@@ -1,39 +1,31 @@
 # Internal Wallet Service
 
-A high-traffic-ready wallet service for application-specific credits (e.g. Gold Coins, reward points). Tracks balances with a **double-entry ledger**, **idempotent** operations, and **deadlock-safe** locking.
+Wallet service for a high-traffic application like a gaming platform or a loyalty rewards system. This service keeps track of each user's balance of application-specific credits or points (for example, "Gold Coins" or "Reward Points").
 
 ---
 
-## Quick Start
+## How to Run Application
 
-### Option 1: Docker (recommended)
+Run the command:
 
 ```bash
-docker-compose up -d
+docker compose up
 ```
 
-- **PostgreSQL**: `localhost:5432` (user: `wallet`, password: `wallet123`, DB: `walletdb`)
-- **App**: http://localhost:8080  
-- Migrations and seed data run automatically on startup (Flyway).
+- **Server:** http://localhost:8080  
+- **PostgreSQL:** `localhost:5432` (user: `wallet`, password: `wallet123`, DB: `walletdb`)  
+- **Redis:** Optional; when enabled, used for idempotency and balance cache.  
+- **Adminer:** Optional DB UI (e.g. port 8090 when configured in Docker Compose).
 
-### Option 2: Local database + Spring Boot
+---
 
-1. Start PostgreSQL and create a database (e.g. `walletdb`).
-2. Set connection in `src/main/resources/application.properties` (or env):
-   - `spring.datasource.url`, `username`, `password`
-3. Run the app:
-   ```bash
-   ./mvnw spring-boot:run
-   ```
-4. Flyway will create schema and apply seed data.
+## Seed Data
 
-### Seed data (what you get)
-
-- **Asset types**: Gold Coins, Diamonds, Loyalty Points  
-- **System wallets**: Treasury (id=1), Bonus Pool (id=2), Revenue (id=3) for Gold Coins  
-- **Users**: `userId=1` and `userId=2` with **Gold Coins** wallets and **initial balances** (500 and 300 respectively)
-
-To re-seed only data on an existing DB (schema already applied), you can run `seed.sql` manually against the DB.
+| Category | Data |
+|----------|------|
+| **Asset types** | Gold Coins, Diamonds, Loyalty Points |
+| **System wallets** | Treasury (id=1), Bonus Pool (id=2), Revenue (id=3) for Gold Coins |
+| **Users** | `userId=1` and `userId=2` with Gold Coins wallets and initial balances **500** and **300** respectively |
 
 ---
 
@@ -41,91 +33,182 @@ To re-seed only data on an existing DB (schema already applied), you can run `se
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/wallet/topup` | User purchases credits (Treasury → user). |
-| `POST` | `/wallet/bonus` | System grants free credits (Bonus Pool → user). |
-| `POST` | `/wallet/spend` | User spends credits (user → Revenue). |
-| `GET`  | `/wallet/{userId}/balance` | Get user balance (sum of ledger entries). |
+| `POST` | `/wallet/topup` | Credit user from Treasury (e.g. after payment). |
+| `POST` | `/wallet/bonus` | Credit user from Bonus Pool (e.g. referral). |
+| `POST` | `/wallet/spend` | Debit user, credit Revenue (in-app purchase). |
+| `GET`  | `/wallet/{userId}/balance` | Get user balance (cached in Redis when enabled). |
+| `GET`  | `/wallet/{userId}/transactions` | Get transaction history for user's wallet. |
 
-### Request body (topup / bonus / spend)
+**Idempotency:** Use header or request body **`Idempotency-Key`** (1–200 chars). Same key → same transaction id; no double credit/debit.
 
-```json
-{
-  "userId": 1,
-  "amount": 100,
-  "idempotencyKey": "unique-key-per-operation"
-}
+---
+
+## Technology Choice
+
+| Technology | Role |
+|------------|------|
+| **Java 21, Spring Boot 3** | REST, transaction management, validation |
+| **PostgreSQL 15** | ACID, locking, ledger storage |
+| **Flyway** | Schema and seed migration |
+| **Redis** | Idempotency cache and balance cache |
+| **Docker** | Postgres, Redis, Adminer, app |
+
+---
+
+## Entity Relation
+
+| Entity | Table | Purpose |
+|--------|-------|---------|
+| **AssetType** | `asset_types` | Defines the kind of asset (e.g. Gold Coins, Diamonds, Loyalty Points). |
+| **Wallet** | `wallets` | One account that holds one asset type. Either system (`user_id` NULL) or user (`user_id` set). |
+| **Transaction** | `transactions` | One logical operation (TOPUP, BONUS, SPEND); has `idempotency_key`, `status`. |
+| **LedgerEntry** | `ledger_entries` | One debit or credit line: links a transaction to a wallet with an amount (+ or −). |
+
+### Relationships
+
+- **AssetType → Wallet (1:N)** — DB: `wallets.asset_type_id` → `asset_types.id` (FK)
+- **Wallet → LedgerEntry (1:N)** — DB: `ledger_entries.wallet_id` → `wallets.id` (FK)
+- **Transaction → LedgerEntry (1:N)** — DB: `ledger_entries.transaction_id` → `transactions.id` (FK)
+
+---
+
+## HLD Diagrams
+
+Paste the Mermaid blocks below into [mermaid.live](https://mermaid.live) to view or export.
+
+### 1. Layered Architecture
+
+```mermaid
+flowchart TB
+    subgraph API["API Layer (REST)"]
+        CTRL["WalletController<br/>/wallet/topup, /bonus, /spend<br/>/wallet/{userId}/balance, /transactions"]
+    end
+
+    subgraph Service["Service Layer"]
+        SVC["WalletService<br/>topup(), bonus(), spend(), getTransactionHistory()"]
+        SVC_NOTE["Idempotency · Lock order · Double-entry"]
+    end
+
+    subgraph Data["Data Access Layer"]
+        REPO["WalletRepository, TransactionRepository, LedgerRepository"]
+        REPO_NOTE["PESSIMISTIC_WRITE · Balance = SUM(ledger_entries)"]
+    end
+
+    subgraph Persistence["Persistence"]
+        PGSQL[(PostgreSQL)]
+    end
+
+    CTRL --> SVC
+    SVC --> REPO
+    REPO --> PGSQL
 ```
 
-- **idempotencyKey**: Required. Reusing the same key returns the same transaction id and does not apply the operation again.
+### 2. Database Model
 
-### Examples
+```mermaid
+erDiagram
+    asset_types ||--o{ wallets : "has"
+    wallets ||--o{ ledger_entries : "has"
+    transactions ||--o{ ledger_entries : "has"
 
-```bash
-# Balance (user 1 has 500 after seed)
-curl http://localhost:8080/wallet/1/balance
+    asset_types {
+        int id PK
+        string name UK
+    }
 
-# Top-up 100 (assume payment already processed)
-curl -X POST http://localhost:8080/wallet/topup -H "Content-Type: application/json" \
-  -d '{"userId":1,"amount":100,"idempotencyKey":"pay-001"}'
+    wallets {
+        int id PK
+        int user_id "nullable = system"
+        int asset_type_id FK
+        timestamp created_at
+    }
 
-# Spend 30
-curl -X POST http://localhost:8080/wallet/spend -H "Content-Type: application/json" \
-  -d '{"userId":1,"amount":30,"idempotencyKey":"spend-001"}'
+    transactions {
+        int id PK
+        string type "TOPUP, BONUS, SPEND"
+        string idempotency_key UK
+        string status "PENDING, SUCCESS, FAILED"
+        timestamp created_at
+    }
 
-# Balance again (500 + 100 - 30 = 570)
-curl http://localhost:8080/wallet/1/balance
+    ledger_entries {
+        int id PK
+        int transaction_id FK
+        int wallet_id FK
+        bigint amount "signed: +credit, -debit"
+        timestamp created_at
+    }
+```
+
+### 3. One-Page Overview
+
+```mermaid
+flowchart TB
+    subgraph Clients["Clients"]
+        PG[Payment Gateway]
+        APP[App Server]
+        ADMIN[Admin]
+    end
+
+    subgraph Wallet["Wallet Service"]
+        API[REST API]
+        SVC[WalletService]
+        API --> SVC
+    end
+
+    subgraph Data["Data"]
+        PGSQL[(PostgreSQL)]
+        REDIS[(Redis)]
+    end
+
+    PG --> API
+    APP --> API
+    ADMIN --> API
+    SVC --> PGSQL
+    SVC -.-> REDIS
+
+    subgraph DB["DB Tables"]
+        AT[asset_types]
+        W[wallets]
+        TX[transactions]
+        LE[ledger_entries]
+    end
+    PGSQL --> DB
 ```
 
 ---
 
-## Technology Choices
+## Current Scope
 
-- **Java 21 + Spring Boot 3** – Mature ecosystem, strong transaction and concurrency support.  
-- **PostgreSQL** – ACID, robust locking, and serializable options.  
-- **JPA / Spring Data JPA** – For clear entity mapping and `PESSIMISTIC_WRITE` locking.  
-- **Flyway** – Versioned schema and seed data; reproducible setup.  
-- **Docker + docker-compose** – One command to run DB and app with migrations.
+The current scope of this project has implemented the following:
 
----
-
-## Concurrency and Data Integrity
-
-### 1. Double-entry ledger
-
-- We do **not** only update a balance column. Every movement is stored as **ledger entries** (debit/credit) linked to a **transaction**.
-- Each operation creates one transaction and two ledger rows (source debit, destination credit). Balances are derived as `SUM(amount)` per wallet, so the history is auditable and consistent.
-
-### 2. Idempotency
-
-- Every mutation request requires an **idempotency key**.  
-- Before creating a new transaction we look up by this key. If a transaction already exists, we return its id and **do not** create new ledger entries.  
-- Duplicate requests (e.g. retries) therefore do not double-credit or double-debit.
-
-### 3. Race conditions and locking
-
-- Wallets involved in a transfer are locked with **pessimistic write locks** (`SELECT ... FOR UPDATE`) so two concurrent operations on the same wallet are serialized.
-- **Deadlock avoidance**: we always lock the two wallets in **ascending wallet id order** (e.g. lock smaller id first, then larger). This global ordering prevents circular wait and thus deadlocks between two-wallet operations.
-
-### 4. Transaction boundary
-
-- Each operation runs inside a single **database transaction** (`@Transactional`). Either all ledger entries and the transaction record are committed, or none are, so we never leave partial or inconsistent state.
+1. **Core domain** — Asset types, user accounts, system accounts (Treasury, Bonus Pool, Revenue).
+2. **Double-entry ledger** — Every movement creates one transaction and two ledger entries (debit one wallet, credit another).
+3. **Three operation types**
+   - **TOPUP** — Treasury → user wallet  
+   - **BONUS** — Bonus Pool → user wallet  
+   - **SPEND** — User wallet → Revenue (in-app purchase)
+4. **Idempotency** — Required for all POST APIs. Supplied via header or request body. Prevents duplicate mutations.
+5. **Concurrency and integrity**
+   - **Pessimistic locking** — Both wallets involved in a transfer are locked (`SELECT ... FOR UPDATE`) for the duration of the operation.
+   - **Deadlock avoidance** — Locks always acquired in ascending wallet id order.
+   - **Lock timeout and retry** — Optional DB `lock_timeout`; application retries with backoff on lock timeout / deadlock (configurable attempts and backoff).
+   - **No negative balance** — Enforced on SPEND: balance checked after lock, before writing ledger entries.
+6. **Caching** — Redis for GET balance and idempotency check for faster duplicate handling when enabled.
+7. **Infrastructure and run**
+   - **PostgreSQL** — Single database; schema and seed via Flyway (`V1__init.sql`, `V2__seed_data.sql`).
+   - **Redis** — Used for idempotency and balance cache when configured.
+   - **Docker Compose** — Run app, Postgres, Redis, Adminer with one command.
+   - No authentication/authorization in this service (assumed to be handled by API gateway or upstream).
+8. **Closed-loop system** — No transfer between two user wallets or to external systems.
 
 ---
 
-## Project layout
+## Future Scope
 
-- `src/main/resources/db/migration/` – Flyway: `V1__init.sql` (schema), `V2__seed_data.sql` (asset types + initial balances).
-- `seed.sql` – Optional standalone seed script; Flyway already applies equivalent data.
-- `Dockerfile` + `docker-compose.yml` – Run app and PostgreSQL with migrations on startup.
+1. **Cron job or internal mechanism** to trigger bonus (e.g. scheduled or recurring rewards).
+2. **Audit export / reports** — Export ledger or transactions for finance or compliance.
+3. **Refund mechanism** — API or flow to reverse/refund (e.g. Revenue → user or Treasury → user).
 
 ---
 
-## Deliverables checklist
-
-- **Source code** – This repo.  
-- **seed.sql / setup** – `seed.sql` plus Flyway migrations for DB init and seed.  
-- **README** – Setup, tech choices, and concurrency strategy (above).  
-- **Double-entry ledger** – Implemented.  
-- **Idempotency** – Via `idempotency_key` on transactions.  
-- **Deadlock avoidance** – Lock ordering by wallet id.  
-- **Containerization** – Dockerfile and docker-compose included.
