@@ -1,0 +1,353 @@
+{
+  "info": {
+    "name": "Wallet Service",
+    "description": "API tests for Wallet Service (matches WalletController). Base URL: http://localhost:8080\n\nEndpoints: GET /wallet/{userId}/balance (cached in Redis when enabled), GET /wallet/{userId}/transactions, POST /wallet/topup, /bonus, /spend.\nIdempotency: header Idempotency-Key or body idempotencyKey. Balance cache: when Redis enabled, GET balance uses Redis; writes invalidate cache.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "userId", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Smoke test (run in order)",
+      "description": "1 Balance → 2 Topup → 3 Balance → 4 Transactions → 5 Spend → 6 Balance. Validates all endpoints.",
+      "item": [
+        {
+          "name": "1. Get balance (user 1)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "Response: { \"userId\": 1, \"balance\": 500 } after seed."
+          }
+        },
+        {
+          "name": "2. Topup 100",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 100,\n  \"idempotencyKey\": \"smoke-topup-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "Response: { \"transactionId\": <id> }"
+          }
+        },
+        {
+          "name": "3. Get balance again",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "Balance should be 500 + 100 = 600."
+          }
+        },
+        {
+          "name": "4. Get transactions (user 1)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/transactions",
+            "description": "Response: [{ \"transactionId\", \"type\", \"status\", \"amount\", \"createdAt\" }, ...]"
+          }
+        },
+        {
+          "name": "5. Spend 75",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 75,\n  \"idempotencyKey\": \"smoke-spend-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/spend",
+            "description": "Response: { \"transactionId\": <id> }"
+          }
+        },
+        {
+          "name": "6. Get balance final",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "Balance should be 600 - 75 = 525."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Balance",
+      "item": [
+        {
+          "name": "Get balance (user 1)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "GET /wallet/{userId}/balance → { userId, balance }. With Redis: first call loads from DB and caches. Seed: user 1 = 500."
+          }
+        },
+        {
+          "name": "Get balance (user 2)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/2/balance",
+            "description": "GET /wallet/{userId}/balance. Seed: user 2 = 300."
+          }
+        },
+        {
+          "name": "Get balance — unknown user (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/999/balance",
+            "description": "Expect 404 User wallet not found."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Balance cache (Redis)",
+      "description": "When Redis is enabled: GET balance is cached. Run 1 then 2 to see cached response. Run 3 to invalidate, then 4 to see updated balance.",
+      "item": [
+        {
+          "name": "1. Get balance (cold / fill cache)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "First GET: loads from DB, stores in Redis if enabled."
+          }
+        },
+        {
+          "name": "2. Get balance again (warm / from cache)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "Second GET: when Redis enabled, served from cache."
+          }
+        },
+        {
+          "name": "3. Topup (invalidates balance cache)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 1,\n  \"idempotencyKey\": \"cache-test-invalidate-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "Write invalidates Redis balance cache. Next GET loads from DB."
+          }
+        },
+        {
+          "name": "4. Get balance after write (fresh from DB)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "After topup: cache invalidated; loads from DB, should be previous + 1."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transaction history",
+      "item": [
+        {
+          "name": "Get transactions (user 1)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/transactions",
+            "description": "GET /wallet/{userId}/transactions → [{ transactionId, type, status, amount, createdAt }]. amount = effect on wallet (+ credit, - debit)."
+          }
+        },
+        {
+          "name": "Get transactions (user 2)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/2/transactions",
+            "description": "GET /wallet/{userId}/transactions."
+          }
+        },
+        {
+          "name": "Get transactions — unknown user (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/999/transactions",
+            "description": "Expect 404 User wallet not found."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Topup",
+      "item": [
+        {
+          "name": "Topup (body idempotencyKey)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 100,\n  \"idempotencyKey\": \"topup-user1-100-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "POST /wallet/topup. Body: userId, amount (min 1), idempotencyKey optional if Idempotency-Key header set. Response: { transactionId }."
+          }
+        },
+        {
+          "name": "Topup (Idempotency-Key header)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "topup-header-001" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 50\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "Idempotency from header; body omits idempotencyKey."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bonus",
+      "item": [
+        {
+          "name": "Bonus",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 50,\n  \"idempotencyKey\": \"bonus-user1-50-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/bonus",
+            "description": "POST /wallet/bonus. Response: { transactionId }."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Spend",
+      "item": [
+        {
+          "name": "Spend",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 75,\n  \"idempotencyKey\": \"spend-user1-75-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/spend",
+            "description": "POST /wallet/spend. 400 if insufficient funds. Response: { transactionId }."
+          }
+        },
+        {
+          "name": "Spend — overdraw (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 999999,\n  \"idempotencyKey\": \"spend-overdraw-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/spend",
+            "description": "Expect 400 Insufficient funds."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Idempotency & validation",
+      "item": [
+        {
+          "name": "Idempotency — same key twice (same transactionId)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 10,\n  \"idempotencyKey\": \"topup-idem-test-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "Run twice: both return same transactionId, no double credit."
+          }
+        },
+        {
+          "name": "Missing idempotency key (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 10\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "No Idempotency-Key header and no idempotencyKey in body. Expect 400."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Concurrency",
+      "description": "For parallel/concurrency tests use the PowerShell script. See CONCURRENCY-TESTING.md. Run: .\\scripts\\concurrency-test.ps1 -BaseUrl http://localhost:8080. Postman Runner runs sequentially; script does true parallel (idempotency same-key, load, spend).",
+      "item": [
+        {
+          "name": "(Read me) Run script for concurrency",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/1/balance",
+            "description": "Verify app is up. Then run: .\\scripts\\concurrency-test.ps1 for Idempotency (same key x10), Load (20 topups), Spend (5 spends)."
+          }
+        },
+        {
+          "name": "Idempotency same key (Runner: 10 iterations)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": 1,\n  \"amount\": 100,\n  \"idempotencyKey\": \"runner-idem-same-key-001\"\n}"
+            },
+            "url": "{{baseUrl}}/wallet/topup",
+            "description": "In Collection Runner run this 10 iterations. All should return same transactionId; balance +100 once. For true parallel use script."
+          }
+        }
+      ]
+    }
+  ]
+}
